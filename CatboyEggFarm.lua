@@ -279,7 +279,7 @@ end)
 
 -- Read visible labels and attributes only. Internal egg names vary by game version.
 local function rarityOf(text)
-    text = string.lower(tostring(text))
+    text = string.lower(tostring(text)):gsub("%s+"," ")
     for i, rarity in ipairs(RARITIES) do
         if string.find(text,string.lower(rarity),1,true) then
             return rarity, #RARITIES - i + 1
@@ -348,9 +348,10 @@ local function findGuards()
             if part then
                 local name=obj.Name
                 if obj.Parent then name=name.." "..obj.Parent.Name end
-                if hasWord(name,GUARD_WORDS) then
-                    table.insert(guards,part.Position)
-                end
+                table.insert(guards,{
+                    position=part.Position,
+                    namedGuard=hasWord(name,GUARD_WORDS)
+                })
             end
         end
     end
@@ -358,10 +359,11 @@ local function findGuards()
 end
 
 local function guardedPrompt(prompt,position,guards)
-    for _,guardPos in ipairs(guards) do
-        if (guardPos-position).Magnitude<=GUARD_RADIUS then return true end
+    for _,guard in ipairs(guards) do
+        -- Recognized guards may patrol farther; unnamed NPCs count only very nearby.
+        local radius=guard.namedGuard and GUARD_RADIUS or 22
+        if (guard.position-position).Magnitude<=radius then return true end
     end
-    -- Some guards have no Humanoid. The egg may be grouped under a guard zone.
     local node=prompt.Parent
     for _=1,8 do
         if not node or node==workspace then break end
@@ -371,6 +373,28 @@ local function guardedPrompt(prompt,position,guards)
         node=node.Parent
     end
     return false
+end
+
+-- Read labels attached to an egg model, not the entire world/zone.
+local function readLocalEggLabels(prompt,labels)
+    local node=prompt.Parent
+    local scanned=0
+    for depth=1,3 do
+        if not node or node==workspace then break end
+        local descendants=node:GetDescendants()
+        for _,child in ipairs(descendants) do
+            scanned+=1
+            if scanned>170 then return end
+            if child:IsA("TextLabel") or child:IsA("TextButton") then
+                if type(child.Text)=="string" and #child.Text>0 then
+                    table.insert(labels,child.Text)
+                end
+            elseif child:IsA("StringValue") and #child.Value>0 then
+                table.insert(labels,child.Value)
+            end
+        end
+        node=node.Parent
+    end
 end
 
 local function getCandidate(prompt,guards)
@@ -406,6 +430,7 @@ local function getCandidate(prompt,guards)
         end
         node=node.Parent
     end
+    readLocalEggLabels(prompt,labels)
     local all=table.concat(labels," ")
     local lower=all:lower()
     local action=prompt.ActionText:lower()
