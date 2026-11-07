@@ -6,6 +6,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
@@ -34,6 +35,13 @@ local settings = {
 local runId = 0
 local flight = nil
 local cooldowns = {}
+local escapeRequested = false
+local activeTargetPrompt = nil
+local promptTriggeredConnection = ProximityPromptService.PromptTriggered:Connect(function(prompt,who)
+    if prompt==activeTargetPrompt and (who==nil or who==player) then
+        escapeRequested=true
+    end
+end)
 
 local function characterParts()
     local c = player.Character
@@ -177,12 +185,14 @@ local function updateCarryButton()
 end
 carryButton.MouseButton1Click:Connect(function()
     settings.manualCarry=not settings.manualCarry
+    if settings.manualCarry then escapeRequested=true end
     updateCarryButton()
     setStatus(settings.manualCarry and "Яйцо уже в руках: полечу домой, без нового подбора."
         or "Ручной режим переноски выключен.")
 end)
 quickHome.MouseButton1Click:Connect(function()
     settings.manualCarry=true
+    escapeRequested=true
     updateCarryButton()
     setStatus("Принудительный возврат в кафе. Не опускаюсь к яйцам.")
 end)
@@ -522,7 +532,7 @@ local function flyTo(goal,id,interruptOnCarry)
     local previous=start
     while settings.running and runId==id and gui.Parent do
         if not f.root.Parent or f.hum.Health<=0 then return false,"character_lost" end
-        if interruptOnCarry and isCarryingEgg() then
+        if interruptOnCarry and (isCarryingEgg() or escapeRequested) then
             f.velocity.VectorVelocity=Vector3.zero
             return false,"carrying"
         end
@@ -563,7 +573,7 @@ local function flyHighTo(dest,token,approachHeight,interruptOnCarry)
     if not ok then return false,reason end
     ok,reason=flyTo(across,token,interruptOnCarry)
     if not ok then return false,reason end
-    if interruptOnCarry and isCarryingEgg() then return false,"carrying" end
+    if interruptOnCarry and (isCarryingEgg() or escapeRequested) then return false,"carrying" end
     -- Descent allowed only when no egg is carried, or at the saved home.
     return flyTo(dest+Vector3.new(0,approachHeight or 2,0),token,interruptOnCarry)
 end
@@ -585,98 +595,111 @@ local function pickupConfirmed(prompt)
 end
 
 local function interact(prompt,token)
+    if isCarryingEgg() then escapeRequested=true; return true end
     if not prompt or not prompt.Parent or not prompt.Enabled then return false end
     if not settings.running or runId~=token then return false end
-    for attempt=1,2 do
-        if not settings.running or token~=runId then return false end
-        if isCarryingEgg() then return true end
-        local _,root=characterParts()
-        local pos=promptPosition(prompt)
-        if not root or not pos or (root.Position-pos).Magnitude > prompt.MaxActivationDistance+1 then
-            setStatus("Слишком далеко от яйца: подбираю позицию.")
-            return false
-        end
-        local ok=pcall(function()
-            prompt:InputHoldBegin()
-            task.wait(math.clamp(prompt.HoldDuration+0.1,0.1,5))
-            prompt:InputHoldEnd()
-        end)
-        -- Some environments expose this API; no guarantee that the server accepts it.
-        if not pickupConfirmed(prompt) and type(fireproximityprompt)=="function" then
-            pcall(function() fireproximityprompt(prompt) end)
-        end
-        for _=1,9 do
-            if pickupConfirmed(prompt) then return true end
-            task.wait(0.12)
-        end
-        if not ok then warn("Egg prompt input failed") end
+    local _,root=characterParts()
+    local pos=promptPosition(prompt)
+    if not root or not pos or (root.Position-pos).Magnitude > prompt.MaxActivationDistance+1 then
+        setStatus("Яйцо вне дальности взаимодействия: отступаю.")
+        return false
     end
+    local triggered=false
+    local signal=prompt.Triggered:Connect(function(who)
+        if who==nil or who==player then
+            triggered=true
+            escapeRequested=true
+        end
+    end)
+    local ok=pcall(function()
+        prompt:InputHoldBegin()
+        local untilTime=os.clock()+math.max(0,prompt.HoldDuration)
+        while os.clock()<untilTime and settings.running and runId==token do
+            if escapeRequested or isCarryingEgg() then break end
+            task.wait(math.min(0.035,math.max(0,untilTime-os.clock())))
+        end
+        prompt:InputHoldEnd()
+    end)
+    if not triggered and not isCarryingEgg()
+        and type(fireproximityprompt)=="function" then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+    signal:Disconnect()
+    -- Input sent is NOT proof that the server awarded the egg.
+    -- Always retreat, without waiting nearby or attempting a second pickup.
+    if ok or triggered or isCarryingEgg() then escapeRequested=true; return true end
     return false
 end
 
 -- Bring a carried egg home first; do not search for new eggs or dive near guards.
 local function returnHome(token)
     if not settings.home then return false end
-    setStatus("Уже несу яйцо — возвращаюсь в кафе НА ВЫСОТЕ.")
-    local ok,reason=flyHighTo(settings.home,token,1.5,false)
+    local _,root=characterParts()
+    if not root then return false end
+    setStatus("Сразу отступаю от босса: лечу в кафе.")
+    -- Diagonal horizontal+upward escape, rather than climbing in place first.
+    local cruise=math.max(root.Position.Y,settings.home.Y+settings.height)
+    local highHome=Vector3.new(settings.home.X,cruise,settings.home.Z)
+    local ok,reason=flyTo(highHome,token,false)
     if not ok then
-        setStatus("Возврат домой не завершён: "..tostring(reason))
+        setStatus("Отход от босса прерван: "..tostring(reason))
+        return false
     end
+    ok,reason=flyTo(settings.home+Vector3.new(0,1.5,0),token,false)
+    if not ok then setStatus("Спуск к кафе не завершён: "..tostring(reason)) end
     return ok
 end
 
 local function farm(token)
     while settings.running and runId==token and gui.Parent do
         if not settings.home then
-            setStatus("Сначала сохрани точку своего кафе.")
+            setStatus("Сначала сохрани точку кафе.")
             task.wait(0.8)
-        elseif isCarryingEgg() then
+        elseif escapeRequested or isCarryingEgg() then
             local _,root=characterParts()
             if root and (root.Position-settings.home).Magnitude>8 then
                 returnHome(token)
             else
                 stopFlight()
+                activeTargetPrompt=nil
                 if settings.manualCarry then
-                    setStatus("Ты у кафе. После сдачи яйца нажми «Несу яйцо: ДА», чтобы выключить.")
+                    setStatus("У кафе. После сдачи яйца выключи «Несу яйцо».")
                 else
-                    setStatus("У кафе: сдаём яйцо; ждём подтверждения.")
+                    setStatus("У кафе. Ожидаю завершения переноса предмета.")
                 end
-                task.wait(0.7)
+                task.wait(1.25)
+                if not isCarryingEgg() then escapeRequested=false end
             end
         else
             local egg=findTarget()
             if not egg then
-                setStatus("Охраняемых яиц не найдено. Базы игроков игнорируются.")
+                setStatus("Охраняемых яиц не найдено; базы игроков игнорируются.")
                 task.wait(1)
             else
+                activeTargetPrompt=egg.prompt
                 setStatus("Лечу за яйцом: "..(egg.rarity or "без редкости"))
                 local maxDist=egg.prompt.MaxActivationDistance
-                -- Hover within the prompt's activation radius rather than dropping to ground level.
-                -- Server-side interaction and guard ranges are not known.
                 local pickupHeight=math.max(0.8,math.min(25,maxDist*0.82))
                 local arrived,reason=flyHighTo(egg.pos,token,pickupHeight,true)
-                if isCarryingEgg() or reason=="carrying" then
-                    -- Picked it up manually while flying: immediately return.
+                if escapeRequested or isCarryingEgg() or reason=="carrying" then
+                    escapeRequested=true
                     returnHome(token)
                 elseif arrived and settings.running and runId==token then
-                    if isCarryingEgg() then
-                        returnHome(token)
-                    else
-                        setStatus("Пробую взять яйцо...")
-                        local used=interact(egg.prompt,token)
-                        if used or isCarryingEgg() then
-                            returnHome(token)
-                        else
-                            setStatus("Подбор не подтверждён — несуществующий захват не засчитываю.")
-                        end
+                    setStatus("Взаимодействую и сразу отступаю.")
+                    local attempted=interact(egg.prompt,token)
+                    if not attempted then
+                        setStatus("Подбор не подтверждён: отступаю.")
+                        escapeRequested=true
                     end
+                    returnHome(token)
                 else
-                    setStatus("Перемещение не завершено: "..tostring(reason))
+                    setStatus("Подлёт не завершён: "..tostring(reason))
                 end
-                cooldowns[egg.prompt]=os.clock()+8
+                activeTargetPrompt=nil
+                cooldowns[egg.prompt]=os.clock()+12
             end
         end
-        task.wait(0.15)
+        task.wait(0.10)
     end
     stopFlight()
 end
@@ -684,6 +707,8 @@ end
 local function stop()
     settings.running=false
     runId=runId+1
+    activeTargetPrompt=nil
+    escapeRequested=false
     quickHome.Visible=false
     stopFlight()
     startButton.Text="START AUTO EGGS"
@@ -701,6 +726,8 @@ startButton.MouseButton1Click:Connect(function()
         return
     end
     settings.running=true
+    escapeRequested=false
+    activeTargetPrompt=nil
     runId=runId+1
     quickHome.Visible=true
     startButton.Text="STOP AUTO EGGS"
@@ -720,6 +747,7 @@ closeButton.MouseButton1Click:Connect(function()
     closed=true
     stop()
     if cameraConnection then cameraConnection:Disconnect() end
+    if promptTriggeredConnection then promptTriggeredConnection:Disconnect() end
     gui:Destroy()
 end)
 
@@ -731,4 +759,4 @@ player.CharacterAdded:Connect(function()
 end)
 gui.Destroying:Connect(function() stop() end)
 
-print("Catboy Egg Farm loaded. Carry-aware auto return; speed=400, height=55.")
+print("Catboy Egg Farm loaded. Immediate retreat after egg interaction.")
