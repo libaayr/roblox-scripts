@@ -26,7 +26,7 @@ local RARITIES = {
 }
 local settings = {
     running = false,
-    mode = "selected", -- changing checkboxes automatically selects strict filter mode
+    mode = "best", -- start with working discovery; any checkbox switches to strict filter
     speed = 400, -- requested flight velocity (server may restrict actual speed)
     height = 55, -- travel height above destination, not a boss immunity setting
     home = nil,
@@ -37,7 +37,7 @@ local runId = 0
 local flight = nil
 local cooldowns = {}
 local deliveryRequested = false
-local scanCounts = {}
+local scanCounts = {total=0,candidates=0,matched=0,guards=0}
 local escapeRequested = false
 local activeTargetPrompt = nil
 local promptTriggeredConnection = ProximityPromptService.PromptTriggered:Connect(function(prompt,who)
@@ -103,7 +103,7 @@ local function roundedButton(parent, name, pos, size)
     return b
 end
 
-local modeButton = roundedButton(main, "Режим: выбранные редкости", UDim2.fromOffset(16,90), UDim2.fromOffset(320,35))
+local modeButton = roundedButton(main, "Режим: самое дорогое", UDim2.fromOffset(16,90), UDim2.fromOffset(320,35))
 modeButton.MouseButton1Click:Connect(function()
     settings.mode = settings.mode == "best" and "selected" or "best"
     modeButton.Text = settings.mode == "best" and "Режим: самое дорогое" or "Режим: выбранные редкости"
@@ -375,23 +375,32 @@ local function guardedPrompt(prompt,position,guards)
     return false
 end
 
--- Read labels attached to an egg model, not the entire world/zone.
+-- Limit GUI scanning to the first nearby model, without traversing whole zones.
 local function readLocalEggLabels(prompt,labels)
     local node=prompt.Parent
-    local scanned=0
-    for depth=1,3 do
+    for _=1,5 do
         if not node or node==workspace then break end
-        local descendants=node:GetDescendants()
-        for _,child in ipairs(descendants) do
-            scanned+=1
-            if scanned>170 then return end
-            if child:IsA("TextLabel") or child:IsA("TextButton") then
-                if type(child.Text)=="string" and #child.Text>0 then
-                    table.insert(labels,child.Text)
+        if node:IsA("Model") or node:IsA("BasePart") then
+            local queue={node}
+            local head=1
+            local scanned=0
+            while head<=#queue and scanned<90 do
+                local child=queue[head]
+                head+=1
+                scanned+=1
+                if child:IsA("TextLabel") or child:IsA("TextButton") then
+                    if child.Text~="" then table.insert(labels,child.Text) end
+                elseif child:IsA("StringValue") and child.Value~="" then
+                    table.insert(labels,child.Value)
                 end
-            elseif child:IsA("StringValue") and #child.Value>0 then
-                table.insert(labels,child.Value)
+                if #queue<110 then
+                    for _,sub in ipairs(child:GetChildren()) do
+                        if #queue>=110 then break end
+                        queue[#queue+1]=sub
+                    end
+                end
             end
+            if node:IsA("Model") then return end
         end
         node=node.Parent
     end
@@ -403,9 +412,12 @@ local function getCandidate(prompt,guards)
     if not pos then return nil end
     local onSpawn,onBase=classifyLocation(prompt)
     if onBase then return nil end
+    local action=prompt.ActionText:lower()
+    local stealAction=hasWord(action,{"steal","rob","укра"})
     local isGuarded=guardedPrompt(prompt,pos,guards)
-    if onSpawn and not isGuarded then return nil end
-    if not isGuarded then return nil end
+    -- Explicit steal prompts can be guarded even if NPCs are server-hidden.
+    if not isGuarded and not stealAction then return nil end
+    if onSpawn and not (isGuarded and stealAction) then return nil end
     local labels={prompt.Name,prompt.ActionText,prompt.ObjectText}
     local price=nil
     local node=prompt.Parent
@@ -433,7 +445,6 @@ local function getCandidate(prompt,guards)
     readLocalEggLabels(prompt,labels)
     local all=table.concat(labels," ")
     local lower=all:lower()
-    local action=prompt.ActionText:lower()
     for _,prohibited in ipairs({"buy","purchase","robux","r$","skip","gamepass","купить","покупка"}) do
         if action:find(prohibited,1,true) then return nil end
     end
@@ -443,11 +454,8 @@ local function getCandidate(prompt,guards)
         if lower:find(word,1,true) then isEgg=true; break end
     end
     if not isEgg then return nil end
-    local stealAction = action:find("steal",1,true)
-        or action:find("rob",1,true)
-        or action:find("укра",1,true)
     return {prompt=prompt,pos=pos,rarity=rarity,rank=rank,
-        value=price or 0,stealAction=not not stealAction}
+        value=price or 0,stealAction=stealAction}
 end
 
 local function findTarget()
@@ -455,10 +463,14 @@ local function findTarget()
     if not root then return nil end
     local best,bestScore,bestDist=nil,-math.huge,math.huge
     local guards=findGuards()
+    local counts={total=0,candidates=0,matched=0,guards=#guards}
     for _,obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") then
+            counts.total+=1
             local egg=getCandidate(obj,guards)
+            if egg then counts.candidates+=1 end
             if egg and (settings.mode=="best" or settings.selected[egg.rarity]==true) then
+                counts.matched+=1
                 local distance=(egg.pos-root.Position).Magnitude
                 -- Highest rarity first; numeric value breaks ties where present.
                 local score=egg.rank*1e12+egg.value
@@ -468,6 +480,7 @@ local function findTarget()
             end
         end
     end
+    scanCounts=counts
     return best
 end
 
@@ -557,12 +570,7 @@ local function isCarryingEgg()
             return true
         end
     end
-    local backpack=player:FindFirstChildOfClass("Backpack")
-    if backpack then
-        for _,child in ipairs(backpack:GetChildren()) do
-            if isEggTool(child) then return true end
-        end
-    end
+    -- Stored Backpack tools are inventory, not proof of carrying an egg.
     return false
 end
 
@@ -735,7 +743,8 @@ local function farm(token)
                 end
                 table.sort(chosen)
                 local filter=settings.mode=="selected" and table.concat(chosen,", ") or "все редкости"
-                setStatus("Целей не найдено для: "..filter..". Другие редкости не подставляю.")
+                setStatus("Нет целей ("..filter.."). Prompt: "..scanCounts.total..
+                    ", охраняемых: "..scanCounts.candidates..", NPC: "..scanCounts.guards)
                 task.wait(1)
             else
                 activeTargetPrompt=egg.prompt
@@ -788,6 +797,7 @@ startButton.MouseButton1Click:Connect(function()
         return
     end
     settings.running=true
+    setStatus("Запущено. Сканирую яйца; если целей нет, покажу счётчики.")
     deliveryRequested=false
     escapeRequested=false
     activeTargetPrompt=nil
@@ -822,4 +832,4 @@ player.CharacterAdded:Connect(function()
 end)
 gui.Destroying:Connect(function() stop() end)
 
-print("Catboy Egg Farm loaded. Immediate retreat after egg interaction.")
+print("Catboy Egg Farm loaded. Diagnostic counters enabled; backpack does not count as carried.")
