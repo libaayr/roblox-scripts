@@ -25,8 +25,8 @@ local RARITIES = {
 local settings = {
     running = false,
     mode = "best", -- "best" = highest available rarity/value, "selected" = chosen rarities
-    speed = 100, -- studs/second. Server may restrict this.
-    height = 30, -- studs above destination during travel, not guaranteed guard-safe
+    speed = 220, -- studs/second, subject to server physics restrictions.
+    height = 45, -- flight altitude, not guaranteed safe from guards
     home = nil,
     selected = { Divine=true, ["Super Secret"]=true, Secret=true },
 }
@@ -59,20 +59,20 @@ local textColor = c({242, 245, 250})
 local muted = c({166, 178, 196})
 
 local main = make("Frame", gui, {
-    Size=UDim2.fromOffset(352, 493), Position=UDim2.new(0,26,0.5,-245),
+    Size=UDim2.fromOffset(352, 445), Position=UDim2.fromOffset(20,20),
     BackgroundColor3=bg, BorderSizePixel=0, Active=true
 })
 make("UICorner", main, {CornerRadius=UDim.new(0,13)})
 make("UIStroke", main, {Color=c({65,74,96}), Thickness=1})
 
 local title = make("TextLabel", main, {
-    Size=UDim2.fromOffset(320,35), Position=UDim2.fromOffset(16,10),
+    Size=UDim2.fromOffset(245,35), Position=UDim2.fromOffset(16,10),
     BackgroundTransparency=1, Text="RAISE A CATBOY  |  EGG FARM",
     TextColor3=textColor, Font=Enum.Font.GothamBold,
     TextSize=15, TextXAlignment=Enum.TextXAlignment.Left
 })
 local info = make("TextLabel", main, {
-    Size=UDim2.fromOffset(320,39), Position=UDim2.fromOffset(16,48),
+    Size=UDim2.fromOffset(320,37), Position=UDim2.fromOffset(16,47),
     BackgroundTransparency=1, Text="Ожидание. Сохрани точку своего кафе.",
     TextColor3=muted, Font=Enum.Font.Gotham, TextSize=12,
     TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left
@@ -91,22 +91,22 @@ local function roundedButton(parent, name, pos, size)
     return b
 end
 
-local modeButton = roundedButton(main, "Режим: самое дорогое", UDim2.fromOffset(16,95), UDim2.fromOffset(320,35))
+local modeButton = roundedButton(main, "Режим: самое дорогое", UDim2.fromOffset(16,90), UDim2.fromOffset(320,35))
 modeButton.MouseButton1Click:Connect(function()
     settings.mode = settings.mode == "best" and "selected" or "best"
     modeButton.Text = settings.mode == "best" and "Режим: самое дорогое" or "Режим: выбранные редкости"
 end)
 
 make("TextLabel", main, {
-    Position=UDim2.fromOffset(16,136), Size=UDim2.fromOffset(320,23),
+    Position=UDim2.fromOffset(16,132), Size=UDim2.fromOffset(320,23),
     BackgroundTransparency=1, Text="Редкости (для режима выбора):",
     TextColor3=muted, Font=Enum.Font.Gotham, TextSize=12,
     TextXAlignment=Enum.TextXAlignment.Left
 })
 local scroll = make("ScrollingFrame", main, {
-    Position=UDim2.fromOffset(16,160), Size=UDim2.fromOffset(320,161),
+    Position=UDim2.fromOffset(16,154), Size=UDim2.fromOffset(320,123),
     BackgroundTransparency=1, BorderSizePixel=0,
-    ScrollBarThickness=4, CanvasSize=UDim2.fromOffset(0,186)
+    ScrollBarThickness=4, CanvasSize=UDim2.fromOffset(0,200)
 })
 make("UIGridLayout", scroll, {
     CellSize=UDim2.fromOffset(150,25), CellPadding=UDim2.fromOffset(8,5),
@@ -130,12 +130,12 @@ end
 
 local function numericBox(x, caption, value)
     make("TextLabel", main, {
-        Position=UDim2.fromOffset(x,330), Size=UDim2.fromOffset(147,20),
+        Position=UDim2.fromOffset(x,286), Size=UDim2.fromOffset(147,20),
         BackgroundTransparency=1, Text=caption, TextColor3=muted,
         TextSize=12, Font=Enum.Font.Gotham, TextXAlignment=Enum.TextXAlignment.Left
     })
     local box = make("TextBox", main, {
-        Position=UDim2.fromOffset(x,350), Size=UDim2.fromOffset(147,32),
+        Position=UDim2.fromOffset(x,306), Size=UDim2.fromOffset(147,32),
         BackgroundColor3=surface, BorderSizePixel=0, Text=tostring(value),
         TextColor3=textColor, Font=Enum.Font.GothamMedium, TextSize=14,
         ClearTextOnFocus=false, TextXAlignment=Enum.TextXAlignment.Center
@@ -143,8 +143,8 @@ local function numericBox(x, caption, value)
     make("UICorner", box, {CornerRadius=UDim.new(0,7)})
     return box
 end
-local speedBox = numericBox(16,"Скорость (20–180)",settings.speed)
-local heightBox = numericBox(189,"Высота (8–80)",settings.height)
+local speedBox = numericBox(16,"Скорость (40–400)",settings.speed)
+local heightBox = numericBox(189,"Высота (8–150)",settings.height)
 local function bindNumber(box, key, minimum, maximum)
     box.FocusLost:Connect(function()
         local value = tonumber(box.Text)
@@ -152,30 +152,78 @@ local function bindNumber(box, key, minimum, maximum)
         box.Text = tostring(settings[key])
     end)
 end
-bindNumber(speedBox,"speed",20,180)
-bindNumber(heightBox,"height",8,80)
+bindNumber(speedBox,"speed",40,400)
+bindNumber(heightBox,"height",8,150)
 
-local homeButton = roundedButton(main,"Запомнить точку кафе",UDim2.fromOffset(16,393),UDim2.fromOffset(320,36))
-local startButton = roundedButton(main,"START AUTO EGGS",UDim2.fromOffset(16,440),UDim2.fromOffset(320,39))
+local homeButton = roundedButton(main,"Запомнить точку кафе",UDim2.fromOffset(16,351),UDim2.fromOffset(320,36))
+local startButton = roundedButton(main,"START AUTO EGGS",UDim2.fromOffset(16,397),UDim2.fromOffset(320,39))
 startButton.BackgroundColor3=accent
 
--- Window dragging (does not affect the farm).
+-- Adaptive layout: the entire panel fits portrait and landscape viewports.
+-- Tap the minus to minimize; floating button reopens it.
+local uiScale = make("UIScale", main, {Scale=1})
+local minibar = roundedButton(gui, "EGGS", UDim2.fromOffset(12,72), UDim2.fromOffset(75,40))
+minibar.Visible = false
+minibar.ZIndex = 20
+local minimized = false
+local closed = false
+local minimizeButton = roundedButton(main, "—", UDim2.fromOffset(270,10), UDim2.fromOffset(29,29))
+local closeButton = roundedButton(main, "×", UDim2.fromOffset(306,10), UDim2.fromOffset(29,29))
+minimizeButton.ZIndex=5
+closeButton.ZIndex=5
+
+local function adapt()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local v = camera.ViewportSize
+    local scale = math.min(1, (v.X-20)/352, (v.Y-24)/445)
+    uiScale.Scale = math.max(0.42,scale)
+    local w,h=352*uiScale.Scale,445*uiScale.Scale
+    local x=math.clamp(main.Position.X.Offset,0,math.max(0,v.X-w))
+    local y=math.clamp(main.Position.Y.Offset,0,math.max(0,v.Y-h))
+    main.Position=UDim2.fromOffset(x,y)
+end
+local cameraConnection
+local function watchViewport()
+    if cameraConnection then cameraConnection:Disconnect() end
+    local camera=workspace.CurrentCamera
+    if camera then
+        cameraConnection=camera:GetPropertyChangedSignal("ViewportSize"):Connect(adapt)
+    end
+    adapt()
+end
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchViewport)
+watchViewport()
+
+local function setMinimized(value)
+    minimized=value
+    main.Visible=not minimized
+    minibar.Visible=minimized and not closed
+end
+minimizeButton.MouseButton1Click:Connect(function() setMinimized(true) end)
+minibar.MouseButton1Click:Connect(function() setMinimized(false); adapt() end)
+
+-- Drag with mouse or finger; keep the window inside the screen.
 do
-    local dragging=false
-    local startPos, inputPos
+    local dragging, startPos, initial
+    title.Active=true
     title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging=true; startPos=main.Position; inputPos=input.Position
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging=input
+            startPos=main.Position
+            initial=input.Position
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging=false end
-    end)
     UserInputService.InputChanged:Connect(function(input)
-        if not dragging or input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        local delta=input.Position-inputPos
-        main.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+delta.X,
-            startPos.Y.Scale,startPos.Y.Offset+delta.Y)
+        if not dragging then return end
+        if input ~= dragging and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local d=input.Position-initial
+        main.Position=UDim2.fromOffset(startPos.X.Offset+d.X,startPos.Y.Offset+d.Y)
+        adapt()
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input==dragging then dragging=nil end
     end)
 end
 
@@ -336,7 +384,7 @@ local function flyTo(goal,id)
             return false
         end
         if distance<previous-0.7 then previous=distance;lastProgress=os.clock() end
-        local currentSpeed=math.min(settings.speed,math.max(8,distance*3))
+        local currentSpeed=math.min(settings.speed,math.max(24,distance*7))
         f.velocity.VectorVelocity=offset.Unit*currentSpeed
         local flat=Vector3.new(offset.X,0,offset.Z)
         if flat.Magnitude>0.1 then
@@ -359,18 +407,47 @@ local function flyHighTo(dest,token,approachHeight)
     return flyTo(dest+Vector3.new(0,approachHeight or 2,0),token)
 end
 
+-- A successful input call is not proof that the server awarded an egg.
+local function pickupConfirmed(prompt)
+    if not prompt or not prompt.Parent or not prompt.Enabled then return true end
+    local char = player.Character
+    if not char then return false end
+    for _,obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("Tool") and (obj.Name:lower():find("egg",1,true)
+            or obj.Name:lower():find("яйц",1,true)) then
+            return true
+        end
+    end
+    return false
+end
+
 local function interact(prompt,token)
     if not prompt or not prompt.Parent or not prompt.Enabled then return false end
     if not settings.running or runId~=token then return false end
-    local ok=pcall(function()
-        prompt:InputHoldBegin()
-        task.wait(math.clamp(prompt.HoldDuration+0.15,0.15,6))
-        prompt:InputHoldEnd()
-    end)
-    if not ok and type(fireproximityprompt)=="function" then
-        ok=pcall(function() fireproximityprompt(prompt) end)
+    for attempt=1,2 do
+        if not settings.running or token~=runId then return false end
+        local _,root=characterParts()
+        local pos=promptPosition(prompt)
+        if not root or not pos or (root.Position-pos).Magnitude > prompt.MaxActivationDistance+1 then
+            setStatus("Слишком далеко от яйца: подбираю позицию.")
+            return false
+        end
+        local ok=pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(math.clamp(prompt.HoldDuration+0.1,0.1,5))
+            prompt:InputHoldEnd()
+        end)
+        -- Some environments expose this API; no guarantee that the server accepts it.
+        if not pickupConfirmed(prompt) and type(fireproximityprompt)=="function" then
+            pcall(function() fireproximityprompt(prompt) end)
+        end
+        for _=1,9 do
+            if pickupConfirmed(prompt) then return true end
+            task.wait(0.12)
+        end
+        if not ok then warn("Egg prompt input failed") end
     end
-    return ok
+    return false
 end
 
 local function farm(token)
@@ -390,18 +467,17 @@ local function farm(token)
                 if flyHighTo(egg.pos,token,pickupHeight) then
                     setStatus("Пробую взять яйцо...")
                     local used=interact(egg.prompt,token)
-                    task.wait(0.4)
                     if used and settings.running and runId==token then
                         setStatus("Возвращаюсь в кафе...")
                         flyHighTo(settings.home,token,1.5)
                         task.wait(0.6)
                     else
-                        setStatus("Взаимодействие не удалось.")
+                        setStatus("Подбор не подтверждён игрой; пропускаю это яйцо.")
                     end
                 else
                     setStatus("Перемещение не удалось / заблокировано сервером.")
                 end
-                cooldowns[egg.prompt]=os.clock()+10
+                cooldowns[egg.prompt]=os.clock()+ (settings.running and 8 or 3)
             end
         end
     end
@@ -441,6 +517,13 @@ startButton.MouseButton1Click:Connect(function()
     end)
 end)
 
+closeButton.MouseButton1Click:Connect(function()
+    closed=true
+    stop()
+    if cameraConnection then cameraConnection:Disconnect() end
+    gui:Destroy()
+end)
+
 player.CharacterAdded:Connect(function()
     if settings.running then
         stop()
@@ -449,4 +532,4 @@ player.CharacterAdded:Connect(function()
 end)
 gui.Destroying:Connect(function() stop() end)
 
-print("Catboy Egg Farm loaded. Speed=100, height=30. Press START in menu.")
+print("Catboy Egg Farm loaded. Speed=220, height=45. Compact UI for phone landscape.")
