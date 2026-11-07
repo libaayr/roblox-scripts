@@ -25,9 +25,10 @@ local RARITIES = {
 local settings = {
     running = false,
     mode = "best", -- "best" = highest available rarity/value, "selected" = chosen rarities
-    speed = 220, -- studs/second, subject to server physics restrictions.
-    height = 45, -- flight altitude, not guaranteed safe from guards
+    speed = 400, -- requested flight velocity (server may restrict actual speed)
+    height = 55, -- travel height above destination, not a boss immunity setting
     home = nil,
+    manualCarry = false, -- player can force safe return if the game hides carry state
     selected = { Divine=true, ["Super Secret"]=true, Secret=true },
 }
 local runId = 0
@@ -143,7 +144,7 @@ local function numericBox(x, caption, value)
     make("UICorner", box, {CornerRadius=UDim.new(0,7)})
     return box
 end
-local speedBox = numericBox(16,"Скорость (40–400)",settings.speed)
+local speedBox = numericBox(16,"Скорость (40–800)",settings.speed)
 local heightBox = numericBox(189,"Высота (8–150)",settings.height)
 local function bindNumber(box, key, minimum, maximum)
     box.FocusLost:Connect(function()
@@ -152,10 +153,12 @@ local function bindNumber(box, key, minimum, maximum)
         box.Text = tostring(settings[key])
     end)
 end
-bindNumber(speedBox,"speed",40,400)
+bindNumber(speedBox,"speed",40,800)
 bindNumber(heightBox,"height",8,150)
 
-local homeButton = roundedButton(main,"Запомнить точку кафе",UDim2.fromOffset(16,351),UDim2.fromOffset(320,36))
+local homeButton = roundedButton(main,"Сохранить кафе",UDim2.fromOffset(16,351),UDim2.fromOffset(152,36))
+local carryButton = roundedButton(main,"Несу яйцо: НЕТ",UDim2.fromOffset(176,351),UDim2.fromOffset(160,36))
+carryButton.TextSize = 12
 local startButton = roundedButton(main,"START AUTO EGGS",UDim2.fromOffset(16,397),UDim2.fromOffset(320,39))
 startButton.BackgroundColor3=accent
 
@@ -164,6 +167,25 @@ startButton.BackgroundColor3=accent
 local uiScale = make("UIScale", main, {Scale=1})
 local minibar = roundedButton(gui, "EGGS", UDim2.fromOffset(12,72), UDim2.fromOffset(75,40))
 minibar.Visible = false
+local quickHome = roundedButton(gui,"ДОМОЙ",UDim2.fromOffset(94,72),UDim2.fromOffset(87,40))
+quickHome.ZIndex = 20
+quickHome.Visible = false
+quickHome.BackgroundColor3=c({52,106,88})
+local function updateCarryButton()
+    carryButton.Text = settings.manualCarry and "Несу яйцо: ДА" or "Несу яйцо: НЕТ"
+    carryButton.BackgroundColor3 = settings.manualCarry and c({52,106,88}) or surface
+end
+carryButton.MouseButton1Click:Connect(function()
+    settings.manualCarry=not settings.manualCarry
+    updateCarryButton()
+    setStatus(settings.manualCarry and "Яйцо уже в руках: полечу домой, без нового подбора."
+        or "Ручной режим переноски выключен.")
+end)
+quickHome.MouseButton1Click:Connect(function()
+    settings.manualCarry=true
+    updateCarryButton()
+    setStatus("Принудительный возврат в кафе. Не опускаюсь к яйцам.")
+end)
 minibar.ZIndex = 20
 local minimized = false
 local closed = false
@@ -451,27 +473,72 @@ local function ensureFlight()
     return flight
 end
 
-local function flyTo(goal,id)
+-- Carry detection runs before ANY egg search or descent.
+-- Game-specific representation is unknown, so manual carry control is essential.
+local CARRY_ATTRS = {"CarryingEgg","HoldingEgg","HasEgg","IsCarryingEgg",
+    "CarriedEgg","HeldEgg","Carrying","IsCarrying","HoldingItem","HeldItem"}
+local function looksLikeEgg(value)
+    local kind=typeof(value)
+    if kind=="Instance" then value=value.Name
+    elseif kind=="boolean" then return value
+    elseif kind=="number" then return value>0 end
+    if type(value)~="string" then return false end
+    local lowered=value:lower()
+    if lowered=="true" or lowered=="1" then return true end
+    return hasWord(lowered,{"egg","яйц","catboy"})
+end
+local function isCarryingEgg()
+    if settings.manualCarry then return true end
+    local char=player.Character
+    if not char then return false end
+    for _,owner in ipairs({player,char}) do
+        for _,key in ipairs(CARRY_ATTRS) do
+            local value=owner:GetAttribute(key)
+            if value~=nil and looksLikeEgg(value) then return true end
+            local child=owner:FindFirstChild(key)
+            if child and child:IsA("ValueBase") then
+                if looksLikeEgg(child.Value) then return true end
+            end
+        end
+    end
+    for _,child in ipairs(char:GetDescendants()) do
+        if (child:IsA("Tool") or child:IsA("Model")) and child~=char
+            and hasWord(child.Name,{"egg","яйц","carriedcatboy"}) then
+            return true
+        end
+    end
+    return false
+end
+
+
+-- Return "carrying" when a pickup occurs during the approach.
+-- Never continue the descent after this transition.
+local function flyTo(goal,id,interruptOnCarry)
     local f=ensureFlight()
-    if not f then return false end
-    local starting=(f.root.Position-goal).Magnitude
-    local deadline=os.clock()+math.max(6,starting/settings.speed*3+6)
+    if not f then return false,"no_character" end
+    local start=(f.root.Position-goal).Magnitude
+    local deadline=os.clock()+math.max(5,start/math.max(settings.speed,40)*4+5)
     local lastProgress=os.clock()
-    local previous=starting
+    local previous=start
     while settings.running and runId==id and gui.Parent do
-        if not f.root.Parent or f.hum.Health<=0 then return false end
+        if not f.root.Parent or f.hum.Health<=0 then return false,"character_lost" end
+        if interruptOnCarry and isCarryingEgg() then
+            f.velocity.VectorVelocity=Vector3.zero
+            return false,"carrying"
+        end
         local offset=goal-f.root.Position
-        local distance=offset.Magnitude
-        if distance<=2.7 then
+        local dist=offset.Magnitude
+        if dist<=2.7 then
             f.velocity.VectorVelocity=Vector3.zero
             return true
         end
-        if os.clock()>deadline or os.clock()-lastProgress>5 then
+        if os.clock()>deadline or os.clock()-lastProgress>3.5 then
             f.velocity.VectorVelocity=Vector3.zero
-            return false
+            return false,"timeout"
         end
-        if distance<previous-0.7 then previous=distance;lastProgress=os.clock() end
-        local currentSpeed=math.min(settings.speed,math.max(24,distance*7))
+        if dist<previous-0.7 then previous=dist; lastProgress=os.clock() end
+        -- Preserve travel speed for longer; brake only close to the endpoint.
+        local currentSpeed=math.min(settings.speed,math.max(85,dist*18))
         f.velocity.VectorVelocity=offset.Unit*currentSpeed
         local flat=Vector3.new(offset.X,0,offset.Z)
         if flat.Magnitude>0.1 then
@@ -479,23 +546,31 @@ local function flyTo(goal,id)
         end
         RunService.Heartbeat:Wait()
     end
-    if flight and flight.velocity.Parent then flight.velocity.VectorVelocity=Vector3.zero end
-    return false
+    if flight and flight.velocity and flight.velocity.Parent then
+        flight.velocity.VectorVelocity=Vector3.zero
+    end
+    return false,"stopped"
 end
 
-local function flyHighTo(dest,token,approachHeight)
+local function flyHighTo(dest,token,approachHeight,interruptOnCarry)
     local _,root=characterParts()
-    if not root then return false end
-    local top=math.max(root.Position.Y,dest.Y,settings.home.Y)+settings.height
+    if not root then return false,"no_character" end
+    -- No repeated upward increments: maintain one consistent cruise altitude.
+    local top=math.max(root.Position.Y, dest.Y+settings.height,settings.home.Y+settings.height)
     local up=Vector3.new(root.Position.X,top,root.Position.Z)
     local across=Vector3.new(dest.X,top,dest.Z)
-    if not flyTo(up,token) then return false end
-    if not flyTo(across,token) then return false end
-    return flyTo(dest+Vector3.new(0,approachHeight or 2,0),token)
+    local ok,reason=flyTo(up,token,interruptOnCarry)
+    if not ok then return false,reason end
+    ok,reason=flyTo(across,token,interruptOnCarry)
+    if not ok then return false,reason end
+    if interruptOnCarry and isCarryingEgg() then return false,"carrying" end
+    -- Descent allowed only when no egg is carried, or at the saved home.
+    return flyTo(dest+Vector3.new(0,approachHeight or 2,0),token,interruptOnCarry)
 end
 
 -- A successful input call is not proof that the server awarded an egg.
 local function pickupConfirmed(prompt)
+    if isCarryingEgg() then return true end
     if not prompt or not prompt.Parent then return true end
     -- A disabled prompt alone does not reliably prove successful pickup.
     local char = player.Character
@@ -514,6 +589,7 @@ local function interact(prompt,token)
     if not settings.running or runId~=token then return false end
     for attempt=1,2 do
         if not settings.running or token~=runId then return false end
+        if isCarryingEgg() then return true end
         local _,root=characterParts()
         local pos=promptPosition(prompt)
         if not root or not pos or (root.Position-pos).Magnitude > prompt.MaxActivationDistance+1 then
@@ -538,36 +614,67 @@ local function interact(prompt,token)
     return false
 end
 
+-- Bring a carried egg home first; do not search for new eggs or dive near guards.
+local function returnHome(token)
+    if not settings.home then return false end
+    setStatus("Уже несу яйцо — возвращаюсь в кафе НА ВЫСОТЕ.")
+    local ok,reason=flyHighTo(settings.home,token,1.5,false)
+    if not ok then
+        setStatus("Возврат домой не завершён: "..tostring(reason))
+    end
+    return ok
+end
+
 local function farm(token)
     while settings.running and runId==token and gui.Parent do
         if not settings.home then
-            setStatus("Сначала сохрани точку кафе.")
+            setStatus("Сначала сохрани точку своего кафе.")
             task.wait(0.8)
+        elseif isCarryingEgg() then
+            local _,root=characterParts()
+            if root and (root.Position-settings.home).Magnitude>8 then
+                returnHome(token)
+            else
+                stopFlight()
+                if settings.manualCarry then
+                    setStatus("Ты у кафе. После сдачи яйца нажми «Несу яйцо: ДА», чтобы выключить.")
+                else
+                    setStatus("У кафе: сдаём яйцо; ждём подтверждения.")
+                end
+                task.wait(0.7)
+            end
         else
             local egg=findTarget()
             if not egg then
-                setStatus("Яиц возле охранников не обнаружено. Не выбираю базы игроков.")
-                task.wait(1.5)
+                setStatus("Охраняемых яиц не найдено. Базы игроков игнорируются.")
+                task.wait(1)
             else
-                setStatus("Лечу к яйцу: " .. (egg.rarity or "без редкости"))
+                setStatus("Лечу за яйцом: "..(egg.rarity or "без редкости"))
                 local maxDist=egg.prompt.MaxActivationDistance
                 local pickupHeight=math.max(0.5,math.min(2,maxDist*0.45))
-                if flyHighTo(egg.pos,token,pickupHeight) then
-                    setStatus("Пробую взять яйцо...")
-                    local used=interact(egg.prompt,token)
-                    if used and settings.running and runId==token then
-                        setStatus("Возвращаюсь в кафе...")
-                        flyHighTo(settings.home,token,1.5)
-                        task.wait(0.6)
+                local arrived,reason=flyHighTo(egg.pos,token,pickupHeight,true)
+                if isCarryingEgg() or reason=="carrying" then
+                    -- Picked it up manually while flying: immediately return.
+                    returnHome(token)
+                elseif arrived and settings.running and runId==token then
+                    if isCarryingEgg() then
+                        returnHome(token)
                     else
-                        setStatus("Подбор не подтверждён игрой; пропускаю это яйцо.")
+                        setStatus("Пробую взять яйцо...")
+                        local used=interact(egg.prompt,token)
+                        if used or isCarryingEgg() then
+                            returnHome(token)
+                        else
+                            setStatus("Подбор не подтверждён — несуществующий захват не засчитываю.")
+                        end
                     end
                 else
-                    setStatus("Перемещение не удалось / заблокировано сервером.")
+                    setStatus("Перемещение не завершено: "..tostring(reason))
                 end
-                cooldowns[egg.prompt]=os.clock()+ (settings.running and 8 or 3)
+                cooldowns[egg.prompt]=os.clock()+8
             end
         end
+        task.wait(0.15)
     end
     stopFlight()
 end
@@ -575,6 +682,7 @@ end
 local function stop()
     settings.running=false
     runId=runId+1
+    quickHome.Visible=false
     stopFlight()
     startButton.Text="START AUTO EGGS"
     startButton.BackgroundColor3=accent
@@ -592,6 +700,7 @@ startButton.MouseButton1Click:Connect(function()
     end
     settings.running=true
     runId=runId+1
+    quickHome.Visible=true
     startButton.Text="STOP AUTO EGGS"
     startButton.BackgroundColor3=c({177,70,84})
     local token=runId
@@ -620,4 +729,4 @@ player.CharacterAdded:Connect(function()
 end)
 gui.Destroying:Connect(function() stop() end)
 
-print("Catboy Egg Farm loaded. Speed=220, height=45. Compact UI for phone landscape.")
+print("Catboy Egg Farm loaded. Carry-aware auto return; speed=400, height=55.")
