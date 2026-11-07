@@ -256,41 +256,92 @@ local function promptPosition(prompt)
     end
     return nil
 end
--- Ignore eggs displayed in public spawn/lobby/showcase areas.
--- Names are heuristics because the game's internal hierarchy is not public.
+-- Guarded eggs are the only targets. Ignore player plots and decorative spawn items.
+-- Using quoted Unicode keys avoids Luau parser errors in older executors.
 local SPAWN_NAMES = {
     spawn=true, spawns=true, spawnarea=true, spawnzone=true,
     lobby=true, showcase=true, display=true, preview=true,
     eggdisplay=true, eggshowcase=true, exhibition=true,
-    витрина=true, спавн=true, лобби=true
+    ["витрина"]=true, ["спавн"]=true, ["лобби"]=true
 }
 local PLAYER_BASE_NAMES = {
-    base=true, bases=true, plot=true, plots=true,
-    tycoon=true, cafe=true, cafes=true,
-    база=true, кафе=true
+    base=true, bases=true, plot=true, plots=true, tycoon=true,
+    cafe=true, cafes=true, ["база"]=true, ["кафе"]=true
 }
+local GUARD_WORDS = {
+    "catboy", "boss", "guard", "enemy", "protector",
+    "охран", "босс", "страж", "котик"
+}
+local GUARD_RADIUS = 65
+
+local function hasWord(text,words)
+    local n=tostring(text):lower()
+    for _,word in ipairs(words) do
+        if n:find(word,1,true) then return true end
+    end
+    return false
+end
+
 local function classifyLocation(instance)
-    local isSpawn, isPlayerBase = false, false
+    local spawn,base=false,false
     local node=instance
-    for _=1,12 do
+    for _=1,14 do
         if not node or node==workspace then break end
         local name=node.Name:lower():gsub("[^%w_]", "")
-        if SPAWN_NAMES[name] then isSpawn=true end
-        if PLAYER_BASE_NAMES[name] then isPlayerBase=true end
+        if SPAWN_NAMES[name] then spawn=true end
+        if PLAYER_BASE_NAMES[name] then base=true end
         for _,key in ipairs({"Owner","OwnerName","PlayerName","UserId","OwnerUserId"}) do
-            if node:GetAttribute(key)~=nil then isPlayerBase=true end
+            if node:GetAttribute(key)~=nil then base=true end
         end
         node=node.Parent
     end
-    return isSpawn and not isPlayerBase, isPlayerBase
+    return spawn,base
 end
 
-local function getCandidate(prompt)
+local function findGuards()
+    local guards={}
+    for _,obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and not Players:GetPlayerFromCharacter(obj)
+            and obj:FindFirstChildOfClass("Humanoid") then
+            local part=obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                or obj:FindFirstChildWhichIsA("BasePart",true)
+            if part then
+                local name=obj.Name
+                if obj.Parent then name=name.." "..obj.Parent.Name end
+                if hasWord(name,GUARD_WORDS) then
+                    table.insert(guards,part.Position)
+                end
+            end
+        end
+    end
+    return guards
+end
+
+local function guardedPrompt(prompt,position,guards)
+    for _,guardPos in ipairs(guards) do
+        if (guardPos-position).Magnitude<=GUARD_RADIUS then return true end
+    end
+    -- Some guards have no Humanoid. The egg may be grouped under a guard zone.
+    local node=prompt.Parent
+    for _=1,8 do
+        if not node or node==workspace then break end
+        if hasWord(node.Name,{"boss","guard","catboy","enemy","охран","босс","страж"}) then
+            return true
+        end
+        node=node.Parent
+    end
+    return false
+end
+
+local function getCandidate(prompt,guards)
     if not prompt.Enabled or (cooldowns[prompt] or 0)>os.clock() then return nil end
     local pos=promptPosition(prompt)
     if not pos then return nil end
-    local onSpawn, onBase=classifyLocation(prompt)
-    if onSpawn then return nil end
+    local onSpawn,onBase=classifyLocation(prompt)
+    if onBase then return nil end
+    local isGuarded=guardedPrompt(prompt,pos,guards)
+    if onSpawn and not isGuarded then return nil end
+    if not isGuarded then return nil end
     local labels={prompt.Name,prompt.ActionText,prompt.ObjectText}
     local price=nil
     local node=prompt.Parent
@@ -331,20 +382,21 @@ local function getCandidate(prompt)
         or action:find("rob",1,true)
         or action:find("укра",1,true)
     return {prompt=prompt,pos=pos,rarity=rarity,rank=rank,
-        value=price or 0,playerBase=onBase,stealAction=not not stealAction}
+        value=price or 0,stealAction=not not stealAction}
 end
 
 local function findTarget()
     local _,root=characterParts()
     if not root then return nil end
     local best,bestScore,bestDist=nil,-math.huge,math.huge
+    local guards=findGuards()
     for _,obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") then
-            local egg=getCandidate(obj)
+            local egg=getCandidate(obj,guards)
             if egg and (settings.mode=="best" or settings.selected[egg.rarity]==true) then
                 local distance=(egg.pos-root.Position).Magnitude
                 -- Highest rarity first; numeric value breaks ties where present.
-                local score=egg.rank*1e12+egg.value + (egg.stealAction and 1e15 or 0) + (egg.playerBase and 1e14 or 0)
+                local score=egg.rank*1e12+egg.value
                 if score>bestScore or (score==bestScore and distance<bestDist) then
                     best,bestScore,bestDist=egg,score,distance
                 end
@@ -494,7 +546,7 @@ local function farm(token)
         else
             local egg=findTarget()
             if not egg then
-                setStatus("Подходящих яиц вне спавна не найдено. Проверь зону игроков.")
+                setStatus("Яиц возле охранников не обнаружено. Не выбираю базы игроков.")
                 task.wait(1.5)
             else
                 setStatus("Лечу к яйцу: " .. (egg.rarity or "без редкости"))
