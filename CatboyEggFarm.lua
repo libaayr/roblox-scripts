@@ -651,7 +651,9 @@ local function farm(token)
             else
                 setStatus("Лечу за яйцом: "..(egg.rarity or "без редкости"))
                 local maxDist=egg.prompt.MaxActivationDistance
-                local pickupHeight=math.max(0.5,math.min(2,maxDist*0.45))
+                -- Hover within the prompt's activation radius rather than dropping to ground level.
+                -- Server-side interaction and guard ranges are not known.
+                local pickupHeight=math.max(0.8,math.min(25,maxDist*0.82))
                 local arrived,reason=flyHighTo(egg.pos,token,pickupHeight,true)
                 if isCarryingEgg() or reason=="carrying" then
                     -- Picked it up manually while flying: immediately return.
