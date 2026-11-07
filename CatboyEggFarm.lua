@@ -6,6 +6,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local PathfindingService = game:GetService("PathfindingService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -25,7 +26,7 @@ local RARITIES = {
 }
 local settings = {
     running = false,
-    mode = "best", -- "best" = highest available rarity/value, "selected" = chosen rarities
+    mode = "selected", -- changing checkboxes automatically selects strict filter mode
     speed = 400, -- requested flight velocity (server may restrict actual speed)
     height = 55, -- travel height above destination, not a boss immunity setting
     home = nil,
@@ -35,6 +36,8 @@ local settings = {
 local runId = 0
 local flight = nil
 local cooldowns = {}
+local deliveryRequested = false
+local scanCounts = {}
 local escapeRequested = false
 local activeTargetPrompt = nil
 local promptTriggeredConnection = ProximityPromptService.PromptTriggered:Connect(function(prompt,who)
@@ -100,7 +103,7 @@ local function roundedButton(parent, name, pos, size)
     return b
 end
 
-local modeButton = roundedButton(main, "Режим: самое дорогое", UDim2.fromOffset(16,90), UDim2.fromOffset(320,35))
+local modeButton = roundedButton(main, "Режим: выбранные редкости", UDim2.fromOffset(16,90), UDim2.fromOffset(320,35))
 modeButton.MouseButton1Click:Connect(function()
     settings.mode = settings.mode == "best" and "selected" or "best"
     modeButton.Text = settings.mode == "best" and "Режим: самое дорогое" or "Режим: выбранные редкости"
@@ -132,7 +135,10 @@ for i, rarity in ipairs(RARITIES) do
     end
     b.MouseButton1Click:Connect(function()
         settings.selected[rarity] = not settings.selected[rarity]
+        settings.mode = "selected"
+        modeButton.Text = "Режим: выбранные редкости"
         refresh()
+        setStatus("Выбрана фильтрация: только отмеченные редкости. Без подмен.")
     end)
     refresh()
 end
@@ -187,14 +193,16 @@ carryButton.MouseButton1Click:Connect(function()
     settings.manualCarry=not settings.manualCarry
     if settings.manualCarry then escapeRequested=true end
     updateCarryButton()
-    setStatus(settings.manualCarry and "Яйцо уже в руках: полечу домой, без нового подбора."
-        or "Ручной режим переноски выключен.")
+    if not settings.manualCarry then deliveryRequested=false end
+    setStatus(settings.manualCarry and "Яйцо в руках: автополёт отключён. Для обычного движения нажми ДОМОЙ."
+        or "Режим переноски выключен.")
 end)
 quickHome.MouseButton1Click:Connect(function()
     settings.manualCarry=true
     escapeRequested=true
+    deliveryRequested=true
     updateCarryButton()
-    setStatus("Принудительный возврат в кафе. Не опускаюсь к яйцам.")
+    setStatus("ДОМОЙ: обычное движение персонажа. Без полёта и повышенной скорости.")
 end)
 minibar.ZIndex = 20
 local minimized = false
@@ -511,10 +519,23 @@ local function isCarryingEgg()
             end
         end
     end
+    local function isEggTool(item)
+        if not item:IsA("Tool") then return false end
+        if hasWord(item.Name,{"egg","яйц","carriedcatboy"}) then return true end
+        local eggTag=item:GetAttribute("EggType") or item:GetAttribute("Rarity")
+        return eggTag~=nil and tostring(eggTag)~=""
+    end
     for _,child in ipairs(char:GetDescendants()) do
-        if (child:IsA("Tool") or child:IsA("Model")) and child~=char
+        if isEggTool(child) then return true end
+        if child:IsA("Model") and child~=char
             and hasWord(child.Name,{"egg","яйц","carriedcatboy"}) then
             return true
+        end
+    end
+    local backpack=player:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _,child in ipairs(backpack:GetChildren()) do
+            if isEggTool(child) then return true end
         end
     end
     return false
@@ -632,68 +653,83 @@ local function interact(prompt,token)
 end
 
 -- Bring a carried egg home first; do not search for new eggs or dive near guards.
+-- On a carried egg, NEVER use flight constraints or PlatformStand.
+-- The server can reject fast/high movement while an item is attached.
 local function returnHome(token)
     if not settings.home then return false end
-    local _,root=characterParts()
-    if not root then return false end
-    setStatus("Сразу отступаю от босса: лечу в кафе.")
-    -- Diagonal horizontal+upward escape, rather than climbing in place first.
-    local cruise=math.max(root.Position.Y,settings.home.Y+settings.height)
-    local highHome=Vector3.new(settings.home.X,cruise,settings.home.Z)
-    local ok,reason=flyTo(highHome,token,false)
-    if not ok then
-        setStatus("Отход от босса прерван: "..tostring(reason))
-        return false
+    stopFlight()
+    local _,root,hum=characterParts()
+    if not root or not hum or hum.Health<=0 then return false end
+    setStatus("Иду в кафе обычным движением; скорость ограничена самой игрой.")
+
+    local path=PathfindingService:CreatePath({AgentRadius=2,AgentHeight=5,AgentCanJump=true})
+    local ok=pcall(function() path:ComputeAsync(root.Position,settings.home) end)
+    local waypoints=(ok and path.Status==Enum.PathStatus.Success) and path:GetWaypoints()
+        or {{Position=settings.home}}
+    for _,waypoint in ipairs(waypoints) do
+        if not settings.running or runId~=token or not deliveryRequested then return false end
+        if waypoint.Action==Enum.PathWaypointAction.Jump then hum.Jump=true end
+        hum:MoveTo(waypoint.Position)
+        local started=os.clock()
+        while (root.Position-waypoint.Position).Magnitude>4 do
+            if not settings.running or runId~=token or not deliveryRequested
+                or hum.Health<=0 then return false end
+            if os.clock()-started>8 then
+                setStatus("Обычный маршрут прерван. Перенеси яйцо вручную.")
+                return false
+            end
+            task.wait(0.1)
+        end
     end
-    ok,reason=flyTo(settings.home+Vector3.new(0,1.5,0),token,false)
-    if not ok then setStatus("Спуск к кафе не завершён: "..tostring(reason)) end
-    return ok
+    deliveryRequested=false
+    setStatus("Дошли до кафе. Сдай яйцо и выключи «Несу яйцо».")
+    return true
 end
 
+-- Never initiate another pickup while egg/carry attempt is active.
 local function farm(token)
     while settings.running and runId==token and gui.Parent do
         if not settings.home then
             setStatus("Сначала сохрани точку кафе.")
             task.wait(0.8)
         elseif escapeRequested or isCarryingEgg() then
-            local _,root=characterParts()
-            if root and (root.Position-settings.home).Magnitude>8 then
+            stopFlight()
+            activeTargetPrompt=nil
+            if deliveryRequested then
                 returnHome(token)
             else
-                stopFlight()
-                activeTargetPrompt=nil
-                if settings.manualCarry then
-                    setStatus("У кафе. После сдачи яйца выключи «Несу яйцо».")
-                else
-                    setStatus("У кафе. Ожидаю завершения переноса предмета.")
-                end
-                task.wait(1.25)
-                if not isCarryingEgg() then escapeRequested=false end
+                setStatus("Яйцо взято или подбор запрошен. Автополёт отключён: перенеси яйцо вручную или нажми ДОМОЙ.")
+                task.wait(0.75)
             end
         else
             local egg=findTarget()
             if not egg then
-                setStatus("Охраняемых яиц не найдено; базы игроков игнорируются.")
+                local chosen={}
+                for rarity,on in pairs(settings.selected) do
+                    if on then table.insert(chosen,rarity) end
+                end
+                table.sort(chosen)
+                local filter=settings.mode=="selected" and table.concat(chosen,", ") or "все редкости"
+                setStatus("Целей не найдено для: "..filter..". Другие редкости не подставляю.")
                 task.wait(1)
             else
                 activeTargetPrompt=egg.prompt
-                setStatus("Лечу за яйцом: "..(egg.rarity or "без редкости"))
+                setStatus("Цель: "..(egg.rarity or "неизвестная")..". Лечу к яйцу.")
                 local maxDist=egg.prompt.MaxActivationDistance
                 local pickupHeight=math.max(0.8,math.min(25,maxDist*0.82))
                 local arrived,reason=flyHighTo(egg.pos,token,pickupHeight,true)
                 if escapeRequested or isCarryingEgg() or reason=="carrying" then
                     escapeRequested=true
-                    returnHome(token)
+                    stopFlight()
                 elseif arrived and settings.running and runId==token then
-                    setStatus("Взаимодействую и сразу отступаю.")
                     local attempted=interact(egg.prompt,token)
+                    escapeRequested=true
+                    stopFlight()
                     if not attempted then
-                        setStatus("Подбор не подтверждён: отступаю.")
-                        escapeRequested=true
+                        setStatus("Запрос подбора отправлен, но результат не подтверждён.")
                     end
-                    returnHome(token)
                 else
-                    setStatus("Подлёт не завершён: "..tostring(reason))
+                    setStatus("Не удалось подлететь к цели: "..tostring(reason))
                 end
                 activeTargetPrompt=nil
                 cooldowns[egg.prompt]=os.clock()+12
@@ -708,6 +744,7 @@ local function stop()
     settings.running=false
     runId=runId+1
     activeTargetPrompt=nil
+    deliveryRequested=false
     escapeRequested=false
     quickHome.Visible=false
     stopFlight()
@@ -726,6 +763,7 @@ startButton.MouseButton1Click:Connect(function()
         return
     end
     settings.running=true
+    deliveryRequested=false
     escapeRequested=false
     activeTargetPrompt=nil
     runId=runId+1
