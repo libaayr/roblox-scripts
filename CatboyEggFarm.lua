@@ -256,10 +256,41 @@ local function promptPosition(prompt)
     end
     return nil
 end
+-- Ignore eggs displayed in public spawn/lobby/showcase areas.
+-- Names are heuristics because the game's internal hierarchy is not public.
+local SPAWN_NAMES = {
+    spawn=true, spawns=true, spawnarea=true, spawnzone=true,
+    lobby=true, showcase=true, display=true, preview=true,
+    eggdisplay=true, eggshowcase=true, exhibition=true,
+    витрина=true, спавн=true, лобби=true
+}
+local PLAYER_BASE_NAMES = {
+    base=true, bases=true, plot=true, plots=true,
+    tycoon=true, cafe=true, cafes=true,
+    база=true, кафе=true
+}
+local function classifyLocation(instance)
+    local isSpawn, isPlayerBase = false, false
+    local node=instance
+    for _=1,12 do
+        if not node or node==workspace then break end
+        local name=node.Name:lower():gsub("[^%w_]", "")
+        if SPAWN_NAMES[name] then isSpawn=true end
+        if PLAYER_BASE_NAMES[name] then isPlayerBase=true end
+        for _,key in ipairs({"Owner","OwnerName","PlayerName","UserId","OwnerUserId"}) do
+            if node:GetAttribute(key)~=nil then isPlayerBase=true end
+        end
+        node=node.Parent
+    end
+    return isSpawn and not isPlayerBase, isPlayerBase
+end
+
 local function getCandidate(prompt)
     if not prompt.Enabled or (cooldowns[prompt] or 0)>os.clock() then return nil end
     local pos=promptPosition(prompt)
     if not pos then return nil end
+    local onSpawn, onBase=classifyLocation(prompt)
+    if onSpawn then return nil end
     local labels={prompt.Name,prompt.ActionText,prompt.ObjectText}
     local price=nil
     local node=prompt.Parent
@@ -296,7 +327,11 @@ local function getCandidate(prompt)
         if lower:find(word,1,true) then isEgg=true; break end
     end
     if not isEgg then return nil end
-    return {prompt=prompt,pos=pos,rarity=rarity,rank=rank,value=price or 0}
+    local stealAction = action:find("steal",1,true)
+        or action:find("rob",1,true)
+        or action:find("укра",1,true)
+    return {prompt=prompt,pos=pos,rarity=rarity,rank=rank,
+        value=price or 0,playerBase=onBase,stealAction=not not stealAction}
 end
 
 local function findTarget()
@@ -309,7 +344,7 @@ local function findTarget()
             if egg and (settings.mode=="best" or settings.selected[egg.rarity]==true) then
                 local distance=(egg.pos-root.Position).Magnitude
                 -- Highest rarity first; numeric value breaks ties where present.
-                local score=egg.rank*1e12+egg.value
+                local score=egg.rank*1e12+egg.value + (egg.stealAction and 1e15 or 0) + (egg.playerBase and 1e14 or 0)
                 if score>bestScore or (score==bestScore and distance<bestDist) then
                     best,bestScore,bestDist=egg,score,distance
                 end
@@ -409,7 +444,8 @@ end
 
 -- A successful input call is not proof that the server awarded an egg.
 local function pickupConfirmed(prompt)
-    if not prompt or not prompt.Parent or not prompt.Enabled then return true end
+    if not prompt or not prompt.Parent then return true end
+    -- A disabled prompt alone does not reliably prove successful pickup.
     local char = player.Character
     if not char then return false end
     for _,obj in ipairs(char:GetDescendants()) do
@@ -458,7 +494,7 @@ local function farm(token)
         else
             local egg=findTarget()
             if not egg then
-                setStatus("Яйца с доступным ProximityPrompt не найдены. Возможно, игре нужна отдельная адаптация.")
+                setStatus("Подходящих яиц вне спавна не найдено. Проверь зону игроков.")
                 task.wait(1.5)
             else
                 setStatus("Лечу к яйцу: " .. (egg.rarity or "без редкости"))
