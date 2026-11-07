@@ -1,269 +1,225 @@
--- Raise A Catboy: manual egg pickup -> one-tap return home.
--- Exactly two buttons: Save Home and Fly Home.
--- This is client-side movement only. The server controls whether an egg stays carried.
--- No automatic egg search, pickup, inventory edits, or anti-cheat bypass.
+-- Raise A Catboy: 2-button manual return helper (ground route only).
+-- Fast flight caused carried eggs to drop. Do not use LinearVelocity, CFrame teleport,
+-- PlatformStand, TweenService, or change WalkSpeed with an egg.
+-- This script does not grant inventory items or bypass server pickup rules.
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-local OPTIONS = {
-    LIFT_HEIGHT = 65,       -- studs above the higher of player/home
-    UP_SPEED = 330,        -- vertical studs per second (requested)
-    CRUISE_SPEED = 430,    -- horizontal studs per second (requested)
-    DOWN_SPEED = 250,      -- near home
-    ARRIVE_RADIUS = 3.5,
-}
-
--- Close earlier versions. Their GUI Destroying handler stops their flight.
-local previous = playerGui:FindFirstChild("CatboyEggFarmGUI")
-if previous then previous:Destroy() end
+local old = playerGui:FindFirstChild("CatboyEggFarmGUI")
+if old then old:Destroy() end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "CatboyEggFarmGUI"
 gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = false
 gui.DisplayOrder = 80
+gui.IgnoreGuiInset = false
 gui.Parent = playerGui
 
-local homePosition = nil
-local inFlight = false
-local runId = 0
-local active = nil
-
-local function ui(className, parent, properties)
-    local instance = Instance.new(className)
-    for property, value in pairs(properties) do instance[property] = value end
+local function make(class, parent, properties)
+    local instance = Instance.new(class)
+    for key, value in pairs(properties) do instance[key] = value end
     instance.Parent = parent
     return instance
 end
 
-local panel = ui("Frame", gui, {
-    Size = UDim2.fromOffset(282, 146),
-    Position = UDim2.new(0, 12, 0.5, -73),
+local panel = make("Frame", gui, {
+    Size = UDim2.fromOffset(284, 153),
+    Position = UDim2.new(0, 12, 0.5, -76),
     BackgroundColor3 = Color3.fromRGB(22, 24, 34),
     BorderSizePixel = 0,
 })
-ui("UICorner", panel, {CornerRadius = UDim.new(0, 12)})
-ui("UIStroke", panel, {Color = Color3.fromRGB(65, 79, 104), Thickness = 1})
-local scale = ui("UIScale", panel, {Scale = 1})
+make("UICorner", panel, {CornerRadius = UDim.new(0, 12)})
+make("UIStroke", panel, {Color = Color3.fromRGB(65, 79, 104), Thickness = 1})
+local scale = make("UIScale", panel, {Scale = 1})
 
-local status = ui("TextLabel", panel, {
-    Position = UDim2.fromOffset(12, 8),
-    Size = UDim2.fromOffset(258, 28),
+local status = make("TextLabel", panel, {
+    Position = UDim2.fromOffset(9, 8),
+    Size = UDim2.fromOffset(266, 30),
     BackgroundTransparency = 1,
-    Font = Enum.Font.GothamMedium,
-    Text = "Сначала сохрани точку дома",
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(220, 229, 243),
-    TextXAlignment = Enum.TextXAlignment.Center,
+    Text = "Сохрани дом, затем вручную возьми яйцо",
+    TextColor3 = Color3.fromRGB(231, 234, 242),
+    TextSize = 11,
     TextWrapped = true,
+    Font = Enum.Font.GothamMedium,
 })
 
-local function button(text, y, color)
-    local b = ui("TextButton", panel, {
-        Position = UDim2.fromOffset(12, y),
-        Size = UDim2.fromOffset(258, 43),
+local function button(name, y, color)
+    local b = make("TextButton", panel, {
+        Position = UDim2.fromOffset(11, y),
+        Size = UDim2.fromOffset(262, 44),
         BackgroundColor3 = color,
+        Text = name,
+        TextSize = 14,
+        Font = Enum.Font.GothamBold,
         TextColor3 = Color3.fromRGB(255, 255, 255),
-        Text = text,
-        TextSize = 15,
-        Font = Enum.Font.GothamSemibold,
-        AutoButtonColor = true,
         BorderSizePixel = 0,
     })
-    ui("UICorner", b, {CornerRadius = UDim.new(0, 9)})
+    make("UICorner", b, {CornerRadius = UDim.new(0, 9)})
     return b
 end
 
--- These are the ONLY two buttons.
-local saveButton = button("1. СОХРАНИТЬ ДОМ", 39, Color3.fromRGB(50, 107, 91))
-local flyButton = button("2. БЫСТРО ДОМОЙ", 91, Color3.fromRGB(70, 117, 190))
+-- Exactly two clickable buttons.
+local saveButton = button("1. СОХРАНИТЬ ДОМ", 41, Color3.fromRGB(48, 107, 86))
+local homeButton = button("2. ДОМОЙ ПО ЗЕМЛЕ", 97, Color3.fromRGB(68, 116, 189))
 
-local function updateLayout()
+local function adapt()
     local camera = workspace.CurrentCamera
     if not camera then return end
-    local size = camera.ViewportSize
-    scale.Scale = math.min(1, math.max(0.55,
-        (size.X - 24) / 282), math.max(0.55, (size.Y - 24) / 146))
-    panel.Position = UDim2.new(0, 12, 0.5, -73 * scale.Scale)
+    local v = camera.ViewportSize
+    scale.Scale = math.min(1, math.max(0.35, (v.X - 20) / 284),
+        math.max(0.35, (v.Y - 20) / 153))
+    panel.Position = UDim2.new(0, 12, 0.5, -76 * scale.Scale)
 end
-local viewportConnection
-local function attachCamera()
-    if viewportConnection then viewportConnection:Disconnect() end
+local cameraConnection
+local function watchCamera()
+    if cameraConnection then cameraConnection:Disconnect() end
     local camera = workspace.CurrentCamera
     if camera then
-        viewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateLayout)
+        cameraConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(adapt)
     end
-    updateLayout()
+    adapt()
 end
-attachCamera()
-local cameraChanged = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(attachCamera)
+watchCamera()
+local cameraChangedConnection =
+    workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchCamera)
+
+local homePosition = nil
+local running = false
+local jobId = 0
 
 local function getParts()
-    local character = player.Character
-    if not character then return nil end
-    local root = character:FindFirstChild("HumanoidRootPart")
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not root or not humanoid or humanoid.Health <= 0 then return nil end
-    return root, humanoid
-end
-
-local function cleanup()
-    local f = active
-    active = nil
-    if not f then return end
-    if f.velocity then f.velocity:Destroy() end
-    if f.attachment then f.attachment:Destroy() end
-    if f.humanoid and f.humanoid.Parent then
-        f.humanoid.AutoRotate = f.oldAutoRotate
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if root and humanoid and humanoid.Health > 0 then
+        return root, humanoid
     end
 end
 
-local function makeFlight()
+local function cancel()
+    running = false
+    jobId += 1
     local root, humanoid = getParts()
-    if not root then return nil end
-
-    local attachment = Instance.new("Attachment")
-    attachment.Name = "CatboyReturnAttachment"
-    attachment.Parent = root
-
-    local velocity = Instance.new("LinearVelocity")
-    velocity.Name = "CatboyReturnVelocity"
-    velocity.Attachment0 = attachment
-    velocity.RelativeTo = Enum.ActuatorRelativeTo.World
-    velocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
-    velocity.ForceLimitsEnabled = false
-    velocity.VectorVelocity = Vector3.zero
-    velocity.Parent = root
-
-    active = {
-        root = root,
-        humanoid = humanoid,
-        attachment = attachment,
-        velocity = velocity,
-        oldAutoRotate = humanoid.AutoRotate,
-    }
-    -- Do NOT use PlatformStand, which may interfere with carrying eggs.
-    humanoid.AutoRotate = false
-    return active
+    if root then humanoid:MoveTo(root.Position) end
+    homeButton.Text = "2. ДОМОЙ ПО ЗЕМЛЕ"
 end
 
-local function goTo(goal, maximumSpeed, token)
-    local f = active
-    if not f then return false end
-    local startDistance = (goal - f.root.Position).Magnitude
-    local deadline = os.clock() + math.max(3, startDistance / maximumSpeed * 3 + 2)
-    local previousDistance = startDistance
-    local lastProgressAt = os.clock()
+local function reach(point, token)
+    local root, humanoid = getParts()
+    if not root then return false end
+    local startDistance = (root.Position - point).Magnitude
+    local timeout = math.max(4, startDistance / math.max(6, humanoid.WalkSpeed) * 2.5 + 3)
+    humanoid:MoveTo(point)
+    local began = os.clock()
+    local previous = startDistance
+    local stagnant = os.clock()
 
-    while token == runId and gui.Parent and f.root.Parent
-        and f.humanoid.Health > 0 do
-        local offset = goal - f.root.Position
-        local distance = offset.Magnitude
-
-        if distance <= OPTIONS.ARRIVE_RADIUS then
-            f.velocity.VectorVelocity = Vector3.zero
-            return true
+    while running and token == jobId and humanoid.Health > 0 and gui.Parent do
+        local distance = (root.Position - point).Magnitude
+        if distance <= 4 then return true end
+        if distance < previous - 0.5 then
+            previous = distance
+            stagnant = os.clock()
         end
-
-        if distance < previousDistance - 0.5 then
-            previousDistance = distance
-            lastProgressAt = os.clock()
+        if os.clock() - began > timeout or os.clock() - stagnant > 4 then
+            return false
         end
-        if os.clock() > deadline or os.clock() - lastProgressAt > 2 then
-            break
-        end
-
-        -- Continuous velocity, with braking only as the destination approaches.
-        local requestedSpeed = math.min(maximumSpeed, math.max(18, distance * 12))
-        f.velocity.VectorVelocity = offset.Unit * requestedSpeed
-        RunService.Heartbeat:Wait()
-    end
-
-    if f.velocity and f.velocity.Parent then
-        f.velocity.VectorVelocity = Vector3.zero
+        task.wait(0.08)
     end
     return false
 end
 
+local function walkHome(token)
+    local root = getParts()
+    if not root or not homePosition then return false end
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        WaypointSpacing = 4
+    })
+    local ok = pcall(function()
+        path:ComputeAsync(root.Position, homePosition)
+    end)
+
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        status.Text = "Маршрут не найден. Вернись вручную"
+        return false
+    end
+
+    local waypoints = path:GetWaypoints()
+    for index, waypoint in ipairs(waypoints) do
+        if not running or jobId ~= token then return false end
+        local currentRoot, humanoid = getParts()
+        if not currentRoot then return false end
+        status.Text = ("Маршрут к дому: %d/%d"):format(index, #waypoints)
+        if waypoint.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+        if not reach(waypoint.Position, token) then
+            status.Text = "Путь прерван — попробуй вернуться вручную"
+            return false
+        end
+    end
+    return true
+end
+
 saveButton.MouseButton1Click:Connect(function()
-    if inFlight then return end
+    if running then return end
     local root = getParts()
     if not root then
         status.Text = "Персонаж ещё не появился"
         return
     end
     homePosition = root.Position
-    status.Text = "Точка дома сохранена"
+    status.Text = "Дом сохранён. Возьми яйцо вручную"
 end)
 
-flyButton.MouseButton1Click:Connect(function()
-    if inFlight then return end
+homeButton.MouseButton1Click:Connect(function()
+    if running then
+        cancel()
+        status.Text = "Маршрут остановлен"
+        return
+    end
     if not homePosition then
-        status.Text = "Сначала нажми «Сохранить дом»"
+        status.Text = "Сначала сохрани точку дома"
         return
     end
     if not getParts() then
         status.Text = "Персонаж ещё не появился"
         return
     end
-
-    inFlight = true
-    runId += 1
-    local token = runId
-    flyButton.Text = "ЛЕЧУ ДОМОЙ..."
-
+    running = true
+    jobId += 1
+    local token = jobId
+    homeButton.Text = "ОСТАНОВИТЬ МАРШРУТ"
+    status.Text = "Возвращаюсь по земле, без принудительного полёта"
     task.spawn(function()
-        local completed = false
-        local ok, err = pcall(function()
-            local f = makeFlight()
-            if not f then return end
-            local top = math.max(f.root.Position.Y, homePosition.Y) + OPTIONS.LIFT_HEIGHT
-
-            -- 1. Immediately rise out of the guarded area.
-            status.Text = "Подъём..."
-            if not goTo(Vector3.new(f.root.Position.X, top, f.root.Position.Z),
-                OPTIONS.UP_SPEED, token) then return end
-
-            -- 2. Fly directly over the saved home.
-            status.Text = "Перелёт к дому..."
-            if not goTo(Vector3.new(homePosition.X, top, homePosition.Z),
-                OPTIONS.CRUISE_SPEED, token) then return end
-
-            -- 3. Descend only after reaching home.
-            status.Text = "Спуск у дома..."
-            completed = goTo(homePosition, OPTIONS.DOWN_SPEED, token)
-        end)
-
-        cleanup()
-        inFlight = false
-        flyButton.Text = "2. БЫСТРО ДОМОЙ"
+        local ok, arrived = pcall(walkHome, token)
+        if jobId ~= token then return end
+        running = false
+        homeButton.Text = "2. ДОМОЙ ПО ЗЕМЛЕ"
         if not ok then
-            warn("Catboy return error:", err)
-            status.Text = "Ошибка полёта — смотри консоль"
-        elseif completed then
-            status.Text = "Ты у дома. Зачёт яйца решает игра"
-        else
-            status.Text = "Полёт прерван или ограничен сервером"
+            status.Text = "Ошибка маршрута — проверь консоль"
+            warn("Catboy walking route:", arrived)
+        elseif arrived then
+            status.Text = "У дома. Зачисление яйца контролирует игра"
         end
     end)
 end)
 
-player.CharacterAdded:Connect(function()
-    runId += 1
-    cleanup()
-    inFlight = false
-    flyButton.Text = "2. БЫСТРО ДОМОЙ"
-    status.Text = homePosition and "Дом сохранён. Можно лететь" or "Сохрани точку дома"
+local charConnection = player.CharacterAdded:Connect(function()
+    cancel()
+    status.Text = homePosition and "Дом сохранён. Возьми яйцо" or "Сохрани дом"
 end)
 
 gui.Destroying:Connect(function()
-    runId += 1
-    cleanup()
-    if viewportConnection then viewportConnection:Disconnect() end
-    if cameraChanged then cameraChanged:Disconnect() end
+    cancel()
+    if cameraConnection then cameraConnection:Disconnect() end
+    if cameraChangedConnection then cameraChangedConnection:Disconnect() end
+    if charConnection then charConnection:Disconnect() end
 end)
 
-print("Catboy manual return loaded: Save Home / Fly Home")
+print("Catboy return updated: two buttons, natural movement only")
